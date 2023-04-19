@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2022 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2023 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,32 +32,51 @@
  ****************************************************************************/
 
 /**
- * @file zero_innovation_heading_update.cpp
- * Control function for ekf heading update when at rest or no other heading source available
+ * @file zero_gyro_update.cpp
+ * Control function for ekf zero gyro update
  */
 
 #include "ekf.h"
 
-void Ekf::controlZeroInnovationHeadingUpdate()
+void Ekf::controlZeroGyroUpdate(const imuSample &imu_delayed)
 {
-	const bool yaw_aiding = _control_status.flags.mag_hdg || _control_status.flags.mag_3D
-				|| _control_status.flags.ev_yaw || _control_status.flags.gps_yaw;
+	// Fuse zero gyro at a limited rate
+	const bool zero_gyro_update_data_ready = isTimedOut(_time_last_zero_gyro_fuse, (uint64_t)2e5);
 
-	// fuse zero innovation at a limited rate if the yaw variance is too large
-	if (_control_status.flags.tilt_align
-	    && !yaw_aiding
-	    && isTimedOut(_time_last_heading_fuse, (uint64_t)200'000)) {
+	if (zero_gyro_update_data_ready) {
+		const bool continuing_conditions_passing = _control_status.flags.vehicle_at_rest
+				&& _control_status_prev.flags.vehicle_at_rest;
 
-		float obs_var = 0.25f;
-		estimator_aid_source1d_s aid_src_status;
-		Vector24f H_YAW;
+		if (continuing_conditions_passing) {
+			// TODO: downsample to avoid aliasing
+			Vector3f delta_ang_scaled = (imu_delayed.delta_ang / imu_delayed.delta_ang_dt) * _dt_ekf_avg;
+			Vector3f innovation = _state.delta_ang_bias - delta_ang_scaled;
 
-		computeYawInnovVarAndH(obs_var, aid_src_status.innovation_variance, H_YAW);
+			const float d_ang_sig = _dt_ekf_avg * math::constrain(_params.gyro_noise, 0.0f, 1.0f);
+			const float obs_var = sq(d_ang_sig);
+			Vector3f innov_var{
+				P(10, 10) + obs_var,
+				P(11, 11) + obs_var,
+				P(12, 12) + obs_var};
 
-		if ((aid_src_status.innovation_variance - obs_var) > sq(_params.mag_heading_noise)) {
-			// The yaw variance is too large, fuse fake measurement
-			float innovation = 0.f;
-			fuseYaw(innovation, obs_var, aid_src_status, H_YAW);
+			for (int i = 0; i < 3; i++) {
+				fuseDeltaAngBias(innovation(i), innov_var(i), i);
+			}
+
+			_time_last_zero_gyro_fuse = _time_delayed_us;
 		}
 	}
+}
+
+void Ekf::fuseDeltaAngBias(const float innov, const float innov_var, const int obs_index)
+{
+	Vector24f K;  // Kalman gain vector for any single observation - sequential fusion is used.
+	const unsigned state_index = obs_index + 10;
+
+	// calculate kalman gain K = PHS, where S = 1/innovation variance
+	for (int row = 0; row < _k_num_states; row++) {
+		K(row) = P(row, state_index) / innov_var;
+	}
+
+	measurementUpdate(K, innov_var, innov);
 }
