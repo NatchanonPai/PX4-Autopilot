@@ -73,7 +73,7 @@ private:
 	int _sequence {1};
 
 	static constexpr uint8_t num_cameras = 6; // Mavlink has reserved component IDs for six cameras
-	
+
 	bool send() override
 	{
 		camera_trigger_s camera_trigger;
@@ -123,6 +123,7 @@ private:
 
 					mavlink_msg_command_long_send_struct(_mavlink->get_channel(), &command_long_msg);
 				}
+
 				return true;
 			}
 		}
