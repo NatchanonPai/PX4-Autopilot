@@ -40,20 +40,25 @@
 
 void Ekf::controlZeroGyroUpdate(const imuSample &imu_delayed)
 {
-	// Fuse zero gyro at a limited rate
-	const bool zero_gyro_update_data_ready = isTimedOut(_time_last_zero_gyro_fuse, (uint64_t)2e5);
+	// Downsample gyro data to run the fusion at a lower rate
+	_zgup_delta_ang += imu_delayed.delta_ang;
+	_zgup_delta_ang_dt += imu_delayed.delta_ang_dt;
+
+	static constexpr float zgup_dt = 0.2f;
+	const bool zero_gyro_update_data_ready = _zgup_delta_ang_dt >= zgup_dt;
 
 	if (zero_gyro_update_data_ready) {
 		const bool continuing_conditions_passing = _control_status.flags.vehicle_at_rest
 				&& _control_status_prev.flags.vehicle_at_rest;
 
 		if (continuing_conditions_passing) {
-			// TODO: downsample to avoid aliasing
-			Vector3f delta_ang_scaled = (imu_delayed.delta_ang / imu_delayed.delta_ang_dt) * _dt_ekf_avg;
+			Vector3f delta_ang_scaled = _zgup_delta_ang / _zgup_delta_ang_dt * _dt_ekf_avg;
 			Vector3f innovation = _state.delta_ang_bias - delta_ang_scaled;
 
 			const float d_ang_sig = _dt_ekf_avg * math::constrain(_params.gyro_noise, 0.0f, 1.0f);
+			//const float obs_var = sq(d_ang_sig) * (_dt_ekf_avg / _zgup_delta_ang_dt); // This is correct but too small for single precision
 			const float obs_var = sq(d_ang_sig);
+
 			Vector3f innov_var{
 				P(10, 10) + obs_var,
 				P(11, 11) + obs_var,
@@ -62,9 +67,11 @@ void Ekf::controlZeroGyroUpdate(const imuSample &imu_delayed)
 			for (int i = 0; i < 3; i++) {
 				fuseDeltaAngBias(innovation(i), innov_var(i), i);
 			}
-
-			_time_last_zero_gyro_fuse = _time_delayed_us;
 		}
+
+		// Reset the integrators
+		_zgup_delta_ang.setZero();
+		_zgup_delta_ang_dt = 0.f;
 	}
 }
 
